@@ -7,7 +7,9 @@ package json2
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"reflect"
 
 	"github.com/gorilla/rpc/v2"
 )
@@ -161,7 +163,10 @@ func (c *CodecRequest) ReadRequest(args interface{}) error {
 			// fallback and attempt an unmarshal with JSON params as
 			// array value and RPC params is struct. Unmarshal into
 			// array containing the request struct.
-			params := [1]interface{}{args}
+			var params []interface{}
+			if params, err = c.fieldsToInterfaceSlice(args); err != nil {
+				return err
+			}
 			if err = json.Unmarshal(*c.request.Params, &params); err != nil {
 				c.err = &Error{
 					Code:    E_INVALID_REQ,
@@ -172,6 +177,24 @@ func (c *CodecRequest) ReadRequest(args interface{}) error {
 		}
 	}
 	return c.err
+}
+
+func (c *CodecRequest) fieldsToInterfaceSlice(input interface{}) ([]interface{}, error) {
+	// Make sure the input is a pointer to a struct
+	v := reflect.ValueOf(input)
+	if v.Kind() != reflect.Ptr || v.IsNil() {
+		return nil, fmt.Errorf("invalid input: %v", input)
+	}
+	v = v.Elem()
+	if v.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("input is not a struct: %v", input)
+	}
+	// Iterate over the fields and extract their values as interface{} types
+	var slice []interface{}
+	for i := 0; i < v.NumField(); i++ {
+		slice = append(slice, v.Field(i).Addr().Interface())
+	}
+	return slice, nil
 }
 
 // WriteResponse encodes the response and writes it to the ResponseWriter.
