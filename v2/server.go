@@ -26,6 +26,8 @@ type Codec interface {
 // CodecRequest decodes a request and encodes a response using a specific
 // serialization scheme.
 type CodecRequest interface {
+	// Reads the request and returns the RPC id.
+	ID() ([]byte, error)
 	// Reads the request and returns the RPC method name.
 	Method() (string, error)
 	// Reads the request filling the RPC method args.
