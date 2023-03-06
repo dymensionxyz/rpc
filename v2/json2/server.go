@@ -139,6 +139,18 @@ func (c *CodecRequest) Method() (string, error) {
 	return "", c.err
 }
 
+// Method returns the RPC id for the current request.
+func (c *CodecRequest) ID() ([]byte, error) {
+	if c.err == nil {
+		requestId, err := c.request.Id.MarshalJSON()
+		if err != nil {
+			return nil, err
+		}
+		return requestId, nil
+	}
+	return nil, c.err
+}
+
 // ReadRequest fills the request object for the RPC method.
 //
 // ReadRequest parses request parameters in two supported forms in
