@@ -6,10 +6,12 @@
 package protorpc
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -77,13 +79,25 @@ func newCodecRequest(r *http.Request) rpc.CodecRequest {
 		return &CodecRequest{request: req, err: fmt.Errorf("rpc: no method: %s", path)}
 	}
 	req.Method = path[index+1:]
-	err := json.NewDecoder(r.Body).Decode(&req.Params)
-	r.Body.Close()
-	var errr error
-	if err != io.EOF {
-		errr = err
+
+	// Copy request body for decoding and access of underlying methods
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		return &CodecRequest{request: req, err: err}
 	}
-	return &CodecRequest{request: req, err: errr}
+	// Close original body
+	r.Body.Close()
+
+	err = json.Unmarshal(b, &req.Params)
+	var codecErr error
+	if err != io.EOF {
+		codecErr = err
+	}
+
+	// Add close method to buffer and pass as request body
+	r.Body = io.NopCloser(bytes.NewBuffer(b))
+
+	return &CodecRequest{request: req, err: codecErr}
 }
 
 // CodecRequest decodes and encodes a single request.
@@ -142,5 +156,7 @@ func (c *CodecRequest) writeServerResponse(w http.ResponseWriter, status int, re
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	w.Write(b)
+	if _, err = w.Write(b); err != nil {
+		log.Fatal(err)
+	}
 }
