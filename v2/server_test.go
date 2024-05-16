@@ -6,7 +6,11 @@
 package rpc
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"testing"
@@ -61,7 +65,7 @@ type MockCodec struct {
 }
 
 func (c MockCodec) NewRequest(*http.Request) CodecRequest {
-	return MockCodecRequest{c.A, c.B}
+	return MockCodecRequest(c)
 }
 
 type MockCodecRequest struct {
@@ -80,12 +84,41 @@ func (r MockCodecRequest) ReadRequest(args interface{}) error {
 
 func (r MockCodecRequest) WriteResponse(w http.ResponseWriter, reply interface{}) {
 	res := reply.(*Service1Response)
-	w.Write([]byte(strconv.Itoa(res.Result)))
+	if _, err := w.Write([]byte(strconv.Itoa(res.Result))); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func (r MockCodecRequest) WriteError(w http.ResponseWriter, status int, err error) {
 	w.WriteHeader(status)
-	w.Write([]byte(err.Error()))
+	_, er := w.Write([]byte(err.Error()))
+	if er != nil {
+		log.Fatal(er)
+	}
+}
+
+type MockCodecJson struct {
+}
+
+func (c MockCodecJson) NewRequest(r *http.Request) CodecRequest {
+	if r.Body == nil {
+		return MockCodecRequest{}
+	}
+
+	inp := new(Service1Request)
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		return MockCodecRequest{}
+	}
+	r.Body.Close()
+
+	if err := json.Unmarshal(b, inp); err != nil {
+		return MockCodecRequest{}
+	}
+
+	r.Body = io.NopCloser(bytes.NewBuffer(b))
+
+	return MockCodecRequest{inp.A, inp.B}
 }
 
 type MockResponseWriter struct {
@@ -123,7 +156,9 @@ func TestServeHTTP(t *testing.T) {
 	expected := A * B
 
 	s := NewServer()
-	s.RegisterService(new(Service1), "")
+	if err := s.RegisterService(new(Service1), ""); err != nil {
+		t.Fatal(err)
+	}
 	s.RegisterCodec(MockCodec{A, B}, "mock")
 	r, err := http.NewRequest("POST", "", nil)
 	if err != nil {
@@ -175,7 +210,9 @@ func TestInterception(t *testing.T) {
 	}
 
 	s := NewServer()
-	s.RegisterService(new(Service1), "")
+	if err = s.RegisterService(new(Service1), ""); err != nil {
+		t.Fatal(err)
+	}
 	s.RegisterCodec(MockCodec{A, B}, "mock")
 	s.RegisterInterceptFunc(func(i *RequestInfo) *http.Request {
 		return r2
@@ -201,6 +238,98 @@ func TestInterception(t *testing.T) {
 		t.Errorf("Response body was %s, should be %s.", w.Body, strconv.Itoa(expected))
 	}
 }
+
+func TestInterceptionWithChange(t *testing.T) {
+	const (
+		A = 2
+		B = 3
+		C = 5
+	)
+	expectedBeforeChange := A * B
+	expectedAfterChange := A * C
+
+	r2, err := http.NewRequest("POST", "mocked/request", bytes.NewBuffer([]byte(`{"A": 2, "B":5}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer()
+	s.RegisterService(new(Service1), "")
+	s.RegisterCodec(MockCodecJson{}, "mock")
+	s.RegisterInterceptFunc(func(i *RequestInfo) *http.Request {
+		return r2
+	})
+
+	r, err := http.NewRequest("POST", "", bytes.NewBuffer([]byte(`{A: 2, B:3}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Content-Type", "mock; dummy")
+	w := NewMockResponseWriter()
+	s.ServeHTTP(w, r)
+	if w.Status != 200 {
+		t.Errorf("Status was %d, should be 200.", w.Status)
+	}
+
+	if w.Body != strconv.Itoa(expectedBeforeChange) && w.Body == strconv.Itoa(expectedAfterChange) {
+		return
+	}
+
+	t.Errorf("Response body was %s, should be %s.", w.Body, strconv.Itoa(expectedAfterChange))
+}
+
+func TestBeforeFunc(t *testing.T) {
+	const (
+		A = 2
+		B = 3
+		C = 5
+	)
+	expectedBeforeChange := A * B
+	expectedAfterChange := A * C
+
+	s := NewServer()
+	s.RegisterService(new(Service1), "")
+	s.RegisterCodec(MockCodecJson{}, "mock")
+	s.RegisterBeforeFunc(func(i *RequestInfo) {
+		r := i.Request
+
+		inp := new(Service1Request)
+		err := json.NewDecoder(r.Body).Decode(inp)
+		if err != nil {
+			t.Error(err)
+			t.Fail()
+		}
+
+		inp.B = C
+
+		b, err := json.Marshal(inp)
+		if err != nil {
+			t.Error(err)
+			t.Fail()
+		}
+
+		r.Body = io.NopCloser(bytes.NewBuffer(b))
+		i.Request = r
+	})
+
+	r, err := http.NewRequest("POST", "", bytes.NewBuffer([]byte(`{"A":2, "B":10}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Content-Type", "mock; dummy")
+	w := NewMockResponseWriter()
+	s.ServeHTTP(w, r)
+	if w.Status != 200 {
+		t.Errorf("Status was %d, should be 200.", w.Status)
+	}
+
+	if w.Body != strconv.Itoa(expectedBeforeChange) && w.Body == strconv.Itoa(expectedAfterChange) {
+		return
+	}
+
+	t.Errorf("Response body was %s, should be %s.", w.Body, strconv.Itoa(expectedAfterChange))
+}
+
 func TestValidationSuccessful(t *testing.T) {
 	const (
 		A = 2
@@ -212,7 +341,10 @@ func TestValidationSuccessful(t *testing.T) {
 	validate := func(info *RequestInfo, v interface{}) error { return nil }
 
 	s := NewServer()
-	s.RegisterService(new(Service1), "")
+	if err := s.RegisterService(new(Service1), ""); err != nil {
+		t.Fatal(err)
+	}
+
 	s.RegisterCodec(MockCodec{A, B}, "mock")
 	s.RegisterValidateRequestFunc(validate)
 
@@ -234,7 +366,7 @@ func TestValidationSuccessful(t *testing.T) {
 func TestValidationFails(t *testing.T) {
 	const expected = "this instance only supports zero values"
 
-	validate := func(r *RequestInfo, v interface{}) error {
+	validate := func(_ *RequestInfo, v interface{}) error {
 		req := v.(*Service1Request)
 		if req.A != 0 || req.B != 0 {
 			return errors.New(expected)
@@ -243,7 +375,10 @@ func TestValidationFails(t *testing.T) {
 	}
 
 	s := NewServer()
-	s.RegisterService(new(Service1), "")
+	if err := s.RegisterService(new(Service1), ""); err != nil {
+		t.Fatal(err)
+	}
+
 	s.RegisterCodec(MockCodec{1, 2}, "mock")
 	s.RegisterValidateRequestFunc(validate)
 
